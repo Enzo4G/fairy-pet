@@ -128,8 +128,8 @@ ACCENT = "#4d8fd6"
 # just deleting a menu entry.
 APP_TITLE = "Fairy 桌宠"
 APP_VERSION = "2.0.0"
-AUTHOR = "（待填）"
-PROJECT_URL = "https://github.com/Enzo4G/fairy-pet"          # 待定：填上仓库地址后，关于窗口里会出现「打开仓库」
+AUTHOR = "Enzo_4G"
+PROJECT_URL = "https://github.com/Enzo4G/fairy-pet"   # 仓库地址，留空则不显示「项目地址」按钮
 CREDIT_NAME = "Chengzhibense / Fairy-DSH"
 CREDIT_URL = "https://github.com/Chengzhibense/Fairy-DSH"
 CREDIT_NOTE = "形象设定与动画逻辑参考了该开源项目"
@@ -1390,7 +1390,7 @@ class AboutWindow(QDialog):
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         if PROJECT_URL:
-            open_action = QPushButton("打开仓库")
+            open_action = QPushButton("项目地址")
             open_action.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(PROJECT_URL)))
             buttons.addWidget(open_action)
         thanks = QPushButton("素材来源")

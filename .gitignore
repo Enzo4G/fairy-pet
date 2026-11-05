@@ -13,7 +13,9 @@ venv/
 # Packaging
 build/
 dist/
+dist_full/
 *.spec
+_tmp_zip/
 
 # Local scratch
 _tmp/

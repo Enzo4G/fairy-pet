@@ -1,0 +1,79 @@
+/* Desktop-pet overrides: the page owns every timeline in JS, so the reference
+   CSS keyframes are switched off. Each part is animated on its own clock. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+
+#stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+/* The sprite keeps a little room around itself so the halo pulse can expand
+   past the disc instead of being cut by the window edge. */
+#stage svg {
+  width: 74%;
+  height: 74%;
+  display: block;
+  overflow: visible;
+}
+
+/* JS drives these, so the stylesheet's canned timelines must not fight it. */
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-corners,
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-sclera,
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-layer-three,
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-layer-two,
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-layer-one,
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-thinking-clip-shape,
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-comforting-clip-shape,
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-eye-flicker {
+  animation: none !important;
+}
+
+.dsh-fairy-corners,
+.dsh-fairy-sclera,
+.dsh-fairy-layer-three,
+.dsh-fairy-layer-two,
+.dsh-fairy-layer-one,
+.dsh-fairy-eyeball {
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  will-change: transform;
+}
+
+.dsh-fairy-thinking-clip-shape {
+  transform-box: view-box;
+  transform-origin: 80px 60px;
+}
+
+.dsh-fairy-signal {
+  will-change: transform, filter;
+}
+
+/* The slice clones are rectangles; without the disc mask their cut edges stick
+   out of the circle and read as a square frame. */
+[data-dsh-fairy-mascot-root="true"] .dsh-fairy-signal[data-glitch="blocks"] .dsh-fairy-glitch-blocks {
+  clip-path: url(#dsh-fairy-disc-clip);
+}
+
+/* The lid clips the eye group; the dark lash shape shows through it. */
+[data-dsh-fairy-mascot-root="true"][data-lid="on"] .dsh-fairy-eye {
+  clip-path: url(#dsh-fairy-thinking-eye-clip);
+}
+
+[data-dsh-fairy-mascot-root="true"][data-glitch] .dsh-fairy-image {
+  opacity: .90;
+}

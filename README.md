@@ -47,7 +47,6 @@
 > 首次启动会向系统申请网络访问（本机 127.0.0.1），用于和 dsh 通信。
 
 ### 方式二：从源码运行
-
 需要 **Windows 10/11** 与 **Python 3.9+**（[下载](https://www.python.org/downloads/)，
 安装时勾选 *Add python.exe to PATH*）。
 
@@ -73,6 +72,12 @@ python -m venv .petenv
 桌宠需要一个**正在运行的 dsh 客户端**。它会在本机端口上自动找到 dsh，
 并用 `~\.dsh\.credentials.yaml` 里的本机会话密钥完成鉴权——不需要你登录、填 token，
 也不会改动 dsh 的任何文件。找不到 dsh 时它会安静地显示「没找到运行中的 dsh」。
+
+## 还有一个 HanaAgent 版
+
+仓库里的 [`hana/`](hana/) 是同一个桌宠的另一条后端：作为 HanaAgent 的 App 存在，
+走 Hana 的本地服务而不是 dsh。形象、动效、调参完全一致，只是输入区换成了 Hana 的
+会话栏。两边配置目录互不干扰，可以同时跑。
 
 ## 右键菜单
 
@@ -109,8 +114,13 @@ setup.bat
 build_exe.bat
 ```
 
-产物在 `dist\FairyPet\`，整个目录一起分发即可（`FairyPet.exe` 依赖同级的
-`_internal\`，这是 Qt WebEngine 的常规形态，单文件模式启动会慢十几秒且容易被杀软误伤）。
+产物在 `dist\FairyPet\`，打包脚本会接着调 `tools\prune_dist.ps1` 删掉用不到的
+Qt 组件（翻译、QML 模块、3D / Charts / Pdf 等），400MB → 291MB。
+整个目录一起分发（`FairyPet.exe` 依赖同级的 `_internal\`，这是 Qt WebEngine
+的常规形态，单文件模式启动会慢十几秒且容易被杀软误伤）。
+
+> 改精简清单时注意：`Qt6WebChannel.dll` 是 WebEngineCore 的硬依赖，
+> `Qt6OpenGL.dll` 是 Qt6Quick 的硬依赖，删了程序会直接起不来（无窗口、无报错）。
 
 ## 已知问题
 

@@ -29,6 +29,10 @@ if errorlevel 1 goto :fail
 
 if not exist "dist\FairyPet\FairyPet.exe" goto :fail
 
+echo   精简产物（删掉用不到的 Qt 组件）...
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\prune_dist.ps1"
+if errorlevel 1 goto :fail
+
 echo.
 echo   完成：dist\FairyPet\FairyPet.exe
 echo   整个 dist\FairyPet 目录一起分发（exe 依赖同级的 _internal\）。
