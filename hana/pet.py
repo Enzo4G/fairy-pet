@@ -907,6 +907,60 @@ def account_profile() -> QWebEngineProfile:
     return profile
 
 
+# --------------------------------------------------------- start at login
+# Windows 把开机自启记在同一个注册表项里，自己写一条是最轻的做法：
+# 不建计划任务、不往启动文件夹放快捷方式，任务管理器的「启动」页也会像别的程序一样列出来。
+# 值里存的是 exe 的绝对路径，所以整目录搬家后它会默默失效——因此菜单先比对当前路径，
+# 对不上就当没开，不会给个勾却什么都不做。
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "FairyHana"
+
+
+def _autostart_name() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.splitext(os.path.basename(sys.executable))[0]
+    return AUTOSTART_NAME
+
+
+def _autostart_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{os.path.abspath(sys.executable)}"'
+    runner = sys.executable
+    if runner.lower().endswith("python.exe"):
+        windowed = runner[: -len("python.exe")] + "pythonw.exe"
+        if os.path.exists(windowed):
+            runner = windowed
+    return f'"{runner}" "{os.path.abspath(__file__)}"'
+
+
+def autostart_enabled() -> bool:
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, _autostart_name())
+        return str(value).strip().lower() == _autostart_command().strip().lower()
+    except OSError:
+        return False
+
+
+def set_autostart(enabled: bool) -> bool:
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, _autostart_name(), 0, winreg.REG_SZ, _autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, _autostart_name())
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError:
+        return False
+
+
 class AboutWindow(QDialog):
     """Who made this, where it lives, and what you may not do with it.
 
@@ -1930,6 +1984,7 @@ class Sprite(QWidget):
     def _on_job_ok(self, kind: str, payload) -> None:
         if kind == "state":
             self.state_failures = 0
+            self.state_ever = True
         if kind == "usage":
             if isinstance(payload, dict) and self.chat_window:
                 key = payload.get("range") or self.usage_range
@@ -2008,6 +2063,14 @@ class Sprite(QWidget):
         self.inflight.discard(kind)
         if kind == "state":
             # Hana owns this process; when its server stops answering, quit.
+            # "Never answered" is different from "stopped answering": at login the
+            # pet can come up before Hana does, and quitting then would leave an
+            # empty desktop. Wait it out instead of counting failures.
+            if not getattr(self, "state_ever", False):
+                self._working = False
+                if self.transient is None:
+                    self.mode = "idle"
+                return
             self.state_failures = getattr(self, "state_failures", 0) + 1
             if self.state_failures >= 12:
                 QApplication.quit()
@@ -2404,6 +2467,10 @@ class Sprite(QWidget):
             pin_group.addAction(action)
             self._pin_actions[key] = action
 
+        autostart_action = menu.addAction("开机自启")
+        autostart_action.setCheckable(True)
+        autostart_action.setChecked(autostart_enabled())
+
         speed_menu = menu.addMenu("动画速度")
         speed_menu.setStyleSheet(menu_style())
         speed_group = QActionGroup(speed_menu)
@@ -2514,6 +2581,12 @@ class Sprite(QWidget):
             self.gaze_enabled = gaze_action.isChecked()
             self.config["gaze"] = self.gaze_enabled
             save_config(self.config)
+        elif chosen == autostart_action:
+            wanted = autostart_action.isChecked()
+            if set_autostart(wanted):
+                self.say("开机自启已打开" if wanted else "开机自启已关闭")
+            else:
+                self.say("写注册表失败，可能被安全软件拦了。")
         elif chosen == account_action:
             self.ask_credentials()
         elif chosen == hide_action:

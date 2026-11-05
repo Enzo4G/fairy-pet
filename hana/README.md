@@ -47,3 +47,6 @@ Hana App 那层壳（`manifest.json` + `index.js`，负责在 Hana 里拉进程�
 依赖 HanaAgent 自带的 App SDK，**没有随本仓库分发**。想做成真正的 App，
 用 Hana 的 `hana-app-creator` 技能照着 `index.js` 的结构自己搭一份；
 本目录只提供 App 会拉起的那支 `pet.py`。
+
+> App 体里的自动拉起已经默认关掉（由 `pet.autostart` 开关控制，存 `"1"` 才回到旧行为），
+> 不然它会跟这个 exe 同时拉起两只脸。现在开机自启由桌宠自己管，见右键菜单。
