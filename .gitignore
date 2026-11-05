@@ -1,0 +1,22 @@
+# Runtime state, never part of the source tree.
+FairyPet/
+startup.log
+*.pid
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.petenv/
+venv/
+
+# Packaging
+build/
+dist/
+*.spec
+
+# Local scratch
+_tmp/
+_回收站/
+NVIDIA Corporation/
+*.bak

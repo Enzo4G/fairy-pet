@@ -1,0 +1,4 @@
+# Runtime dependencies for Fairy 桌宠 (dsh build).
+# QtWebEngine is pinned: 6.10.x leaks about 3.6 MB/s in its renderer as soon as
+# anything on the page animates. 6.8.3 stays flat while the eye beats.
+PySide6==6.8.3
