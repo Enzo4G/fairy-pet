@@ -1935,6 +1935,10 @@ class Sprite(QWidget):
         self.pool = QThreadPool.globalInstance()
         self.pool.setMaxThreadCount(2)
         self.inflight: set[str] = set()
+        # 新对话先只在本窗口里空着，发第一条消息时才真的建会话。
+        # Hana 的会话列表不显示没有任何消息的会话，提前建只会在客户端里多出
+        # 一个看不见的 "Fairy 小窗"，而且点一次加号就多一个。
+        self.pending_new = False
 
         self.anim = QTimer(self)
         self.anim.timeout.connect(self._advance)
@@ -2741,13 +2745,33 @@ class Sprite(QWidget):
         self.pending_images = []
         if self.chat_window:
             self.chat_window.show_attachment([])
+        if self.pending_new:
+            # 建会话 + 发第一句合成一个动作，会话一出现在列表里就已经有内容
+            self.pending_new = False
+
+            def create_then_send():
+                created = self.bridge.new_session() or {}
+                session_id = created.get("sessionId")
+                if not session_id:
+                    raise RuntimeError("没能建立新会话")
+                return self.bridge.send(text, images, str(session_id))
+
+            self.run_job("send", create_then_send)
+            return
         self.run_job("send", lambda: self.bridge.send(text, images))
 
     def _on_select(self, session_id: str) -> None:
+        self.pending_new = False
         self.run_job("select", lambda: self.bridge.select(session_id))
 
     def _on_new(self) -> None:
-        self.run_job("new", self.bridge.new_session)
+        # 只清屏，不建会话：见 __init__ 里 pending_new 的注释
+        self.pending_new = True
+        if self.chat_window:
+            self.chat_window.set_messages([], False)
+            self.chat_window.hint.setText("新对话：发出第一句话时才建立")
+            QTimer.singleShot(2600, lambda: self.chat_window and self.chat_window.hint.setText(""))
+        self.run_job("sessions", self.bridge.sessions)
 
     def _on_thinking(self, level: str) -> None:
         self.run_job("thinking", lambda: self.bridge.set_thinking(level))
