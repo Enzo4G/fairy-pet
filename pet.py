@@ -93,6 +93,15 @@ CONFIG_DIR = os.path.join(HERE, "FairyPet")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 STATE_PATH = os.path.join(CONFIG_DIR, "state.json")
 HANA_HOME = os.path.join(os.path.expanduser("~"), ".hanako")
+
+# Task Manager names a process after its file, so the bundled Chromium helper is
+# renamed to FairyHelper.exe when the folder is packaged (tools/prune_dist.ps1).
+# Qt has to be pointed at the new name before the first WebEngine object exists,
+# hence setting it at import time rather than in main().
+if getattr(sys, "frozen", False):
+    _helper = os.path.join(HERE, "_internal", "PySide6", "FairyHelper.exe")
+    if os.path.exists(_helper):
+        os.environ["QTWEBENGINEPROCESS_PATH"] = _helper
 DSH_HOME = os.path.join(os.path.expanduser("~"), ".dsh")
 
 ART = 256                      # source art (reference geometry scaled 1.6x)

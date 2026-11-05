@@ -20,10 +20,23 @@ App 存在，通过 Hana 的本地服务（`~/.hanako/server-info.json` 里的�
 
 ## 运行
 
+**推荐：直接用打包好的。** 从 [Releases](../../releases) 下载
+`Fairy-Hana-v2.0.0-win64.zip`，解压后双击 `FairyHana.exe`。不需要装 Python。
+
+从源码跑（环境与 dsh 版共用，装一次即可）：
+
 ```bat
-..\setup.bat            :: 环境是共用的，装一次即可
+..\setup.bat
 ..\.petenv\Scripts\pythonw.exe pet.py
 ```
+
+自己重新打包：
+
+```bat
+build_exe.bat
+```
+
+产物在 `dist\FairyHana\`，会自动调 `..\tools\prune_dist.ps1` 精简并改名渲染进程。
 
 关闭时注意：**同一时间只跑一个**。两个版本互斥名不同，可以同时开，但两张脸会
 叠在一起。

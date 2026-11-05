@@ -8,7 +8,7 @@
 # 所以这几个及 QuickTemplates2、QuickControls2 都留着。
 
 param(
-    [string]$Root = (Join-Path (Split-Path -Parent $PSScriptRoot) "dist\FairyPet")
+    [string]$Root = (Join-Path (Split-Path -Parent $PSScriptRoot) "dist\Fairy")
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +52,19 @@ $removed = 0
 foreach ($name in $modules) {
     $path = Join-Path $lib $name
     if (Test-Path $path) { Remove-Item $path -Force; $removed++ }
+}
+
+# 5. Chromium 渲染进程改名：任务管理器里读作 FairyHelper，而不是 QtWebEngineProcess。
+#    pet.py 用 QTWEBENGINEPROCESS_PATH 指到 FairyHelper.exe，这才是实际被拉起的那个。
+#    原名的副本必须留着（1MB）：实测只留改名后的文件时，Qt 找不到默认路径下的
+#    QtWebEngineProcess.exe 就乾脆不启动渲染进程——窗口全黑、stderr 一句不吭。
+$proc = Join-Path $lib "QtWebEngineProcess.exe"
+$helper = Join-Path $lib "FairyHelper.exe"
+if (Test-Path $proc) {
+    Copy-Item -LiteralPath $proc -Destination $helper -Force
+}
+elseif (-not (Test-Path $helper)) {
+    Write-Host "  警告：没找到 QtWebEngineProcess.exe，渲染进程会退回原名"
 }
 
 $after = (Get-ChildItem $Root -Recurse -File | Measure-Object Length -Sum).Sum
