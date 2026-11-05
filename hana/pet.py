@@ -240,9 +240,6 @@ class Bridge:
     def select(self, session_id: str) -> dict:
         return self._call("/select", {"sessionId": session_id})
 
-    def new_session(self) -> dict:
-        return self._call("/new", {})
-
     def models(self) -> dict:
         return self._call("/models")
 
@@ -1394,7 +1391,6 @@ class ChatWindow(QWidget):
     closed = Signal()
     sendRequested = Signal(str, object)
     sessionRequested = Signal(str)
-    newRequested = Signal()
     attachRequested = Signal()
     commandRequested = Signal()
     filesDropped = Signal(object)
@@ -1453,13 +1449,10 @@ class ChatWindow(QWidget):
             f" QComboBox::drop-down {{ border:0; width:16px; }}"
         )
         self.picker.currentIndexChanged.connect(self._on_pick)
-        new_button = self._mini("＋", "新建对话")
-        new_button.clicked.connect(self.newRequested.emit)
         close_button = self._mini("✕", "关闭")
         close_button.clicked.connect(self.close)
         hl.addWidget(title)
         hl.addWidget(self.picker, 1)
-        hl.addWidget(new_button)
         hl.addWidget(close_button)
         root.addWidget(header)
 
@@ -1667,8 +1660,6 @@ class ChatWindow(QWidget):
                 action = menu.addAction(label)
                 action.triggered.connect(lambda _checked=False, value=name: self._run_command("/" + value + " "))
             menu.addSeparator()
-        new_action = menu.addAction("新建对话")
-        new_action.triggered.connect(lambda: self.newRequested.emit())
         compact_action = menu.addAction("压缩上下文")
         compact_action.triggered.connect(lambda: self._run_command("__compact__"))
         clear_action = menu.addAction("清空输入")
@@ -1678,8 +1669,6 @@ class ChatWindow(QWidget):
     def _run_command(self, value: str) -> None:
         if value == "__compact__":
             self.sendRequested.emit("__compact__", None)
-        elif value == "__new__":
-            self.newRequested.emit()
         elif value == "__clear__":
             self.input.clear()
         else:
@@ -1935,10 +1924,6 @@ class Sprite(QWidget):
         self.pool = QThreadPool.globalInstance()
         self.pool.setMaxThreadCount(2)
         self.inflight: set[str] = set()
-        # 新对话先只在本窗口里空着，发第一条消息时才真的建会话。
-        # Hana 的会话列表不显示没有任何消息的会话，提前建只会在客户端里多出
-        # 一个看不见的 "Fairy 小窗"，而且点一次加号就多一个。
-        self.pending_new = False
 
         self.anim = QTimer(self)
         self.anim.timeout.connect(self._advance)
@@ -2057,7 +2042,7 @@ class Sprite(QWidget):
         elif kind == "commands":
             if self.chat_window:
                 self.chat_window.popup_commands((payload or {}).get("commands") or [])
-        elif kind == "select" or kind == "new":
+        elif kind == "select":
             if self.chat_window:
                 self.chat_window.set_messages([], False)
             self.run_job("sessions", self.bridge.sessions)
@@ -2087,7 +2072,7 @@ class Sprite(QWidget):
             if self.chat_window:
                 self.chat_window.cost_bar.set_usage(None, None, message)
             return
-        if self.chat_window and kind in ("send", "select", "new", "setmodel", "thinking", "history"):
+        if self.chat_window and kind in ("send", "select", "setmodel", "thinking", "history"):
             self.chat_window.hint.setText(f"{message}")
         elif kind in ("setmodel", "thinking"):
             self.say("这个开关没被授权，去 Hana 设置里给桌宠开一下。")
@@ -2682,7 +2667,6 @@ class Sprite(QWidget):
             window = ChatWindow(self.config.get("theme"))
             window.sendRequested.connect(self._on_chat_send)
             window.sessionRequested.connect(self._on_select)
-            window.newRequested.connect(self._on_new)
             window.attachRequested.connect(self._on_attach)
             window.filesDropped.connect(self._load_attachments)
             window.modelsRequested.connect(lambda: self.run_job("models", self.bridge.models))
@@ -2745,33 +2729,10 @@ class Sprite(QWidget):
         self.pending_images = []
         if self.chat_window:
             self.chat_window.show_attachment([])
-        if self.pending_new:
-            # 建会话 + 发第一句合成一个动作，会话一出现在列表里就已经有内容
-            self.pending_new = False
-
-            def create_then_send():
-                created = self.bridge.new_session() or {}
-                session_id = created.get("sessionId")
-                if not session_id:
-                    raise RuntimeError("没能建立新会话")
-                return self.bridge.send(text, images, str(session_id))
-
-            self.run_job("send", create_then_send)
-            return
         self.run_job("send", lambda: self.bridge.send(text, images))
 
     def _on_select(self, session_id: str) -> None:
-        self.pending_new = False
         self.run_job("select", lambda: self.bridge.select(session_id))
-
-    def _on_new(self) -> None:
-        # 只清屏，不建会话：见 __init__ 里 pending_new 的注释
-        self.pending_new = True
-        if self.chat_window:
-            self.chat_window.set_messages([], False)
-            self.chat_window.hint.setText("新对话：发出第一句话时才建立")
-            QTimer.singleShot(2600, lambda: self.chat_window and self.chat_window.hint.setText(""))
-        self.run_job("sessions", self.bridge.sessions)
 
     def _on_thinking(self, level: str) -> None:
         self.run_job("thinking", lambda: self.bridge.set_thinking(level))
