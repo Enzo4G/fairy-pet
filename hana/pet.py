@@ -2504,21 +2504,51 @@ class Sprite(QWidget):
     # ------------------------------------------------------------------ chat
 
     def place_chat(self) -> None:
+        """Put the chat beside the pet, and out of its way when the space runs out.
+
+        The window rides along while you drag the pet. Near a screen edge the
+        natural spot gets clamped back on top of the pet, so when that happens
+        it falls back to the first side that has room.
+        """
         if not self.chat_window:
             return
+        win = self.chat_window
+        w, h = win.width(), win.height()
+        gap = 10
+        px, py, pw, ph = self.x(), self.y(), self.width(), self.height()
+
         offset = self.state.get("chatOffset")
         if isinstance(offset, dict) and "dx" in offset and "dy" in offset:
-            x = self.x() + int(offset.get("dx", 0))
-            y = self.y() + int(offset.get("dy", 0))
+            natural = QPoint(px + int(offset.get("dx", 0)), py + int(offset.get("dy", 0)))
         else:
-            x = self.x() + self.width() + 10
-            y = self.y() + self.height() - self.chat_window.height()
+            natural = QPoint(px + pw + gap, py + ph - h)
+
         screen = QApplication.screenAt(self.pos()) or QApplication.primaryScreen()
-        if screen:
-            area = screen.availableGeometry()
-            x = max(area.left() + 6, min(x, area.right() - self.chat_window.width() - 6))
-            y = max(area.top() + 6, min(y, area.bottom() - self.chat_window.height() - 6))
-        self.chat_window.move(x, y)
+        area = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
+        def clamp(point: QPoint) -> QPoint:
+            return QPoint(
+                max(area.left() + 6, min(point.x(), area.right() - w - 6)),
+                max(area.top() + 6, min(point.y(), area.bottom() - h - 6)),
+            )
+
+        # a few pixels of slack: touching the outline already looks wrong
+        pet = QRect(px - 4, py - 4, pw + 8, ph + 8)
+        spots = (
+            natural,
+            QPoint(px + pw + gap, py + ph - h),  # 右侧
+            QPoint(px - w - gap, py + ph - h),  # 左侧
+            QPoint(px + pw - w, py - h - gap),  # 上方
+            QPoint(px + pw - w, py + ph + gap),  # 下方
+        )
+        best, best_key = natural, None
+        for rank, spot in enumerate(spots):
+            point = clamp(spot)
+            hits = QRect(point.x(), point.y(), w, h).intersects(pet)
+            key = (1 if hits else 0, rank)
+            if best_key is None or key < best_key:
+                best, best_key = point, key
+        win.move(best)
 
     def remember_chat_offset(self) -> None:
         if not self.chat_window:
