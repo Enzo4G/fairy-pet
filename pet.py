@@ -151,7 +151,7 @@ ACCENT = "#4d8fd6"
 # block, so a fork that wants to hide the credits has to edit code instead of
 # just deleting a menu entry.
 APP_TITLE = "Fairy 桌宠"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 AUTHOR = "Enzo_4G"
 PROJECT_URL = "https://github.com/Enzo4G/fairy-pet"   # 仓库地址，留空则不显示「项目地址」按钮
 CREDIT_NAME = "Chengzhibense / Fairy-DSH"
