@@ -194,11 +194,15 @@ PIN_MODES = [
 ]
 
 # Edge hide: drop the pet against a side of the screen and it slides mostly out
-# of sight, leaving this much of the body on show; a click slides it back in.
-EDGE_SNAP = 30                # how close to the edge counts as "against it"
-EDGE_VISIBLE = 1 / 5          # share of the body that stays visible when tucked
+# of sight; a click slides it back in. Shares are measured on the eye itself, so
+# the transparent margin the halo needs never counts as "still visible".
+EDGE_SNAP = 30                # how close to the edge the POINTER has to be
+EDGE_HIDDEN = 1 / 10          # share of the disc left showing while tucked away
+EDGE_PEEK = 1 / 3             # share shown while the pointer rests on the sliver
 EDGE_MS = 240                 # slide out
 EDGE_MS_REVEAL = 180          # slide back in, a touch quicker
+ON_SCREEN_SHARE = 1 / 3       # keep at least this much reachable on each axis
+DISC_SHARE = 0.85             # disc diameter as a share of size_px (see overrides.css)
 
 
 # -------------------------------------------------------------- dsh bridge
@@ -2427,9 +2431,16 @@ class Sprite(QWidget):
         self.edge_hide = bool(self.config.get("edgeHide", False))
         self._edge: str | None = None      # "left" / "right" while tucked away
         self._edge_home = QPoint(0, 0)     # where to slide back to
+        self._edge_y = 0                   # vertical anchor while tucked
+        self._edge_share = "hidden"        # which of the two tucked poses is showing
         self._swallow_click = False
         self._slide = QPropertyAnimation(self, b"pos", self)
         self._slide.setEasingCurve(QEasingCurve.OutCubic)
+        # After a drag the pointer is already inside the window, so there is no
+        # enter event to lean on; hovering is polled instead.
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(150)
+        self._edge_timer.timeout.connect(self._watch_edge_pointer)
 
         self.web = QWebEngineView(self)
         self.web.setGeometry(0, 0, self.frame_px, self.frame_px)
@@ -2957,15 +2968,16 @@ class Sprite(QWidget):
         return screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
 
     def keep_on_screen(self, save: bool = False) -> None:
-        """Pull the pet back inside after a resolution change, an unplugged
-        monitor, or a drag that ended past the edge."""
+        """Pull the pet back when less than a third of it is still reachable —
+        after a resolution change, an unplugged monitor or a drag into the void."""
         if self._edge or self._drag_offset is not None:
             return
         if self._slide.state() == QPropertyAnimation.Running:
             return
         area = self._screen_area()
-        x = min(max(self.x(), area.left()), area.right() - self.width() + 1)
-        y = min(max(self.y(), area.top()), area.bottom() - self.height() + 1)
+        keep = int(round(self.frame_px * ON_SCREEN_SHARE))
+        x = min(max(self.x(), area.left() - self.frame_px + keep), area.right() - keep + 1)
+        y = min(max(self.y(), area.top() - self.frame_px + keep), area.bottom() - keep + 1)
         if (x, y) != (self.x(), self.y()):
             self.move(x, y)
             if save:
@@ -2978,33 +2990,77 @@ class Sprite(QWidget):
         self._slide.setEndValue(target)
         self._slide.start()
 
-    def tuck_to_edge(self) -> None:
-        """A drag that ends against a side leaves only a sliver of the pet showing."""
+    def _edge_offset(self, share: float) -> int:
+        """How far off screen the window has to slide to show `share` of the disc."""
+        disc = self.size_px * DISC_SHARE
+        margin = (self.frame_px - disc) / 2
+        return int(round(self.frame_px - margin - disc * share))
+
+    def _edge_target(self, share: float) -> QPoint:
+        area = self._screen_area()
+        offset = self._edge_offset(share)
+        x = area.left() - offset if self._edge == "left" else area.right() - self.frame_px + 1 + offset
+        return QPoint(x, self._edge_y)
+
+    def tuck_to_edge(self, cursor: QPoint) -> None:
+        """A drag that ends with the pointer against a side leaves a sliver showing.
+
+        The side comes from where the pointer is, not from how close the body
+        ended up: dragging the pet itself past the edge is a normal gesture, and
+        a large scale easily overshoots.
+        """
         if not self.edge_hide:
             return
         area = self._screen_area()
-        left_gap = self.x() - area.left()
-        right_gap = area.right() - (self.x() + self.width() - 1)
+        left_gap = cursor.x() - area.left()
+        right_gap = area.right() - cursor.x()
         if min(left_gap, right_gap) > EDGE_SNAP:
             return
-        side = "left" if left_gap <= right_gap else "right"
-        exposed = max(10, int(round(self.width() * EDGE_VISIBLE)))
-        y = min(max(self.y(), area.top()), area.bottom() - self.height() + 1)
-        self._edge_home = QPoint(self.x(), y)
-        hidden_x = area.left() + exposed - self.width() if side == "left" else area.right() - exposed + 1
-        self._edge = side
+        self._edge = "left" if left_gap <= right_gap else "right"
+        self._edge_share = "hidden"
+        self._edge_y = min(max(self.y(), area.top()), area.bottom() - self.frame_px + 1)
+        self._edge_home = QPoint(
+            min(max(self.x(), area.left()), area.right() - self.frame_px + 1),
+            self._edge_y,
+        )
         if self.chat_window and self.chat_window.isVisible():
             self.chat_window.hide()
-        self._slide_to(QPoint(hidden_x, y), EDGE_MS)
+        self._slide_to(self._edge_target(EDGE_HIDDEN), EDGE_MS)
+        self._edge_timer.start()
+
+    def _watch_edge_pointer(self) -> None:
+        if not self._edge:
+            self._edge_timer.stop()
+            return
+        if self.rect().contains(self.mapFromGlobal(QCursor.pos())):
+            self.peek_from_edge()
+        else:
+            self.hide_to_edge()
+
+    def peek_from_edge(self) -> None:
+        """Pointer on the sliver: lean out far enough to be recognizable."""
+        if self._edge and self._edge_share != "peek":
+            self._edge_share = "peek"
+            self._slide_to(self._edge_target(EDGE_PEEK), EDGE_MS_REVEAL)
+
+    def hide_to_edge(self) -> None:
+        if self._edge and self._edge_share != "hidden":
+            self._edge_share = "hidden"
+            self._slide_to(self._edge_target(EDGE_HIDDEN), EDGE_MS_REVEAL)
 
     def reveal_from_edge(self) -> bool:
-        """Clicking the sliver slides the pet back in; True if it was tucked away."""
+        """Clicking the sliver pops the pet back in; True if it was tucked away."""
         if not self._edge:
             return False
         self._edge = None
+        self._edge_timer.stop()
         area = self._screen_area()
-        x = min(max(self._edge_home.x(), area.left()), area.right() - self.width() + 1)
-        y = min(max(self._edge_home.y(), area.top()), area.bottom() - self.height() + 1)
+        x = min(max(self._edge_home.x(), area.left()), area.right() - self.frame_px + 1)
+        y = min(max(self._edge_home.y(), area.top()), area.bottom() - self.frame_px + 1)
+        # The drag that tucked it saved a position that may sit past the edge;
+        # store where it actually lands so a restart puts it in the same place.
+        self.state["pos"] = {"x": x, "y": y}
+        save_state(self.state)
         self._slide_to(QPoint(x, y), EDGE_MS_REVEAL)
         return True
 
@@ -3063,6 +3119,16 @@ class Sprite(QWidget):
 
     # -------------------------------------------------------------- interact
 
+    def enterEvent(self, event) -> None:
+        if self._edge:
+            self.peek_from_edge()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._edge:
+            self.hide_to_edge()
+        super().leaveEvent(event)
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             if self.reveal_from_edge():
@@ -3096,7 +3162,7 @@ class Sprite(QWidget):
                 self.toggle_chat()
             else:
                 self.remember_position()
-                self.tuck_to_edge()
+                self.tuck_to_edge(event.globalPosition().toPoint())
             self._drag_offset = None
         super().mouseReleaseEvent(event)
 
