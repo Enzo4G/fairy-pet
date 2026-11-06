@@ -1906,11 +1906,12 @@ class Sprite(QWidget):
 
         # Edge hide state; the animation object is reused for both directions.
         self.edge_hide = bool(self.config.get("edgeHide", False))
-        self._edge: str | None = None      # "left" / "right" while tucked away
+        self._edge: str | None = None      # "left" / "right" / "top" / "bottom"
         self._edge_home = QPoint(0, 0)     # where to slide back to
+        self._edge_x = 0                   # horizontal anchor while tucked
         self._edge_y = 0                   # vertical anchor while tucked
         self._edge_share = "hidden"        # which of the two tucked poses is showing
-        self._swallow_click = False
+        self._pop_on_release = False       # pressed while tucked: pop on release
         self._slide = QPropertyAnimation(self, b"pos", self)
         self._slide.setEasingCurve(QEasingCurve.OutCubic)
         # After a drag the pointer is already inside the window, so there is no
@@ -2413,32 +2414,43 @@ class Sprite(QWidget):
         return int(round(self.frame_px - margin - disc * share))
 
     def _edge_target(self, share: float) -> QPoint:
+        """Where the window sits when `share` of the disc is still showing."""
         area = self._screen_area()
         offset = self._edge_offset(share)
-        x = area.left() - offset if self._edge == "left" else area.right() - self.frame_px + 1 + offset
-        return QPoint(x, self._edge_y)
+        if self._edge == "left":
+            return QPoint(area.left() - offset, self._edge_y)
+        if self._edge == "right":
+            return QPoint(area.right() - self.frame_px + 1 + offset, self._edge_y)
+        if self._edge == "top":
+            return QPoint(self._edge_x, area.top() - offset)
+        if self._edge == "bottom":
+            return QPoint(self._edge_x, area.bottom() - self.frame_px + 1 + offset)
+        return self.pos()
 
     def tuck_to_edge(self, cursor: QPoint) -> None:
         """A drag that ends with the pointer against a side leaves a sliver showing.
 
         The side comes from where the pointer is, not from how close the body
         ended up: dragging the pet itself past the edge is a normal gesture, and
-        a large scale easily overshoots.
+        a large scale easily overshoots. All four sides behave the same way.
         """
         if not self.edge_hide:
             return
         area = self._screen_area()
-        left_gap = cursor.x() - area.left()
-        right_gap = area.right() - cursor.x()
-        if min(left_gap, right_gap) > EDGE_SNAP:
+        gaps = {
+            "left": cursor.x() - area.left(),
+            "right": area.right() - cursor.x(),
+            "top": cursor.y() - area.top(),
+            "bottom": area.bottom() - cursor.y(),
+        }
+        side = min(gaps, key=lambda key: gaps[key])
+        if gaps[side] > EDGE_SNAP:
             return
-        self._edge = "left" if left_gap <= right_gap else "right"
+        self._edge = side
         self._edge_share = "hidden"
+        self._edge_x = min(max(self.x(), area.left()), area.right() - self.frame_px + 1)
         self._edge_y = min(max(self.y(), area.top()), area.bottom() - self.frame_px + 1)
-        self._edge_home = QPoint(
-            min(max(self.x(), area.left()), area.right() - self.frame_px + 1),
-            self._edge_y,
-        )
+        self._edge_home = QPoint(self._edge_x, self._edge_y)
         if self.chat_window and self.chat_window.isVisible():
             self.chat_window.hide()
         self._slide_to(self._edge_target(EDGE_HIDDEN), EDGE_MS)
@@ -2464,10 +2476,8 @@ class Sprite(QWidget):
             self._edge_share = "hidden"
             self._slide_to(self._edge_target(EDGE_HIDDEN), EDGE_MS_REVEAL)
 
-    def reveal_from_edge(self) -> bool:
-        """Clicking the sliver pops the pet back in; True if it was tucked away."""
-        if not self._edge:
-            return False
+    def pop_out(self) -> None:
+        """Slide back to where it was before hiding."""
         self._edge = None
         self._edge_timer.stop()
         area = self._screen_area()
@@ -2478,6 +2488,12 @@ class Sprite(QWidget):
         self.state["pos"] = {"x": x, "y": y}
         save_state(self.state)
         self._slide_to(QPoint(x, y), EDGE_MS_REVEAL)
+
+    def reveal_from_edge(self) -> bool:
+        """Pop the pet back out; True if it was tucked away."""
+        if not self._edge:
+            return False
+        self.pop_out()
         return True
 
     def apply_pin(self, mode: str | None = None) -> None:
@@ -2547,19 +2563,18 @@ class Sprite(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            if self.reveal_from_edge():
-                # The click only pulls the pet back in; it must not also open the chat.
-                self._swallow_click = True
-                super().mousePressEvent(event)
-                return
+            if self._edge:
+                # Tucked away: holding the button picks the pet up and it follows
+                # the pointer; letting go without moving is what pops it back out.
+                self._edge = None
+                self._edge_timer.stop()
+                self._pop_on_release = True
             self._press_pos = event.globalPosition().toPoint()
             self._drag_offset = self._press_pos - self.pos()
             self._moved = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        if self._swallow_click:
-            return
         if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
             current = event.globalPosition().toPoint()
             if (current - self._press_pos).manhattanLength() > 4:
@@ -2572,8 +2587,10 @@ class Sprite(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            if self._swallow_click:
-                self._swallow_click = False
+            pop = self._pop_on_release and not self._moved
+            self._pop_on_release = False
+            if pop:
+                self.pop_out()
             elif not self._moved:
                 self.toggle_chat()
             else:

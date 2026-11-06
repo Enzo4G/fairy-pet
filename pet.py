@@ -187,6 +187,13 @@ DEFAULT_THEME = {
     "tagSize": 10,
 }
 
+PERMISSION_NAMES = {
+    "read-only": "仅可查看",
+    "workspace-write": "工作区内修改",
+    "danger-full-access": "完全权限",
+    "auto": "自动审查",
+}
+
 PIN_MODES = [
     ("none", "不置顶"),
     ("yield", "不覆盖全屏窗口"),
@@ -316,13 +323,45 @@ class Bridge:
             candidates.append(self.port)
         candidates.extend(port for port in _listening_ports() if port not in candidates)
         for port in candidates:
-            if self._looks_like_dsh(port):
-                self.port = port
-                self.cookie = self._mint(port)
-                return
+            if not self._looks_like_dsh(port):
+                continue
+            cookie = self._mint(port)
+            # Other local servers answer `/` with text that mentions dsh too;
+            # ask for the session list before trusting a port.
+            if not self._probe(port, cookie):
+                continue
+            self.port = port
+            self.cookie = cookie
+            return
         self.port = None
         self.cookie = None
         raise RuntimeError("没找到运行中的 dsh，先把 dsh 客户端打开")
+
+    @staticmethod
+    def _probe(port: int, cookie: str) -> bool:
+        envelope = {
+            "type": "client-request",
+            "rpcId": "petprobe",
+            "method": "session/list",
+            "payload": {"args": {"_request": {}}},
+        }
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/session/list",
+            data=json.dumps(envelope).encode("utf-8"),
+            headers={
+                "Host": f"127.0.0.1:{port}",
+                "Cookie": cookie,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2.5) as response:
+                data = json.loads(response.read().decode("utf-8", "replace"))
+        except Exception:
+            return False
+        return bool(((data or {}).get("result") or {}).get("ok"))
 
     def ready(self) -> bool:
         try:
@@ -680,8 +719,38 @@ class Bridge:
         sid = self._current_id(rows)
         if not sid:
             raise RuntimeError("先开一个对话")
-        self._rpc("agentPresets/select", {"agentId": sid, "agentPreset": preset_id})
+        try:
+            self._rpc("agentPresets/select", {"agentId": sid, "agentPreset": preset_id})
+        except RuntimeError as error:
+            # dsh only composes a preset before the session's first turn.
+            if "already started" in str(error):
+                raise RuntimeError("模式只能在对话开始前选，这条已经开始了") from None
+            raise
         return {"agentPreset": preset_id}
+
+    def permissions(self) -> dict:
+        """Selectable permission presets plus the current session's value."""
+        catalog = self._rpc("permissionPresets/catalog", {}) or {}
+        rows = self._rows()
+        sid = self._current_id(rows)
+        values = self._values(self._row(rows, sid))
+        current = (values.get("permissions") or {}).get("currentValue")
+        return {"options": catalog.get("options") or [], "current": current}
+
+    def set_permission(self, value: str) -> dict:
+        """Same entry point the client uses: run `/permission <preset>` in the session."""
+        rows = self._rows()
+        sid = self._current_id(rows)
+        if not sid:
+            raise RuntimeError("先开一个对话")
+        result = self._rpc(
+            "commands/execute",
+            {"agentId": sid, "line": f"/permission {value}", "submittedAttachments": []},
+        ) or {}
+        outcome = result.get("result") or {}
+        if outcome.get("kind") == "error":
+            raise RuntimeError(outcome.get("text") or "权限没改成")
+        return {"permission": value}
 
 
 # ------------------------------------------------------------- system metrics
@@ -1827,6 +1896,7 @@ class ChatWindow(QWidget):
     thinkingRequested = Signal(str)
     workspacesRequested = Signal()
     presetsRequested = Signal()
+    permissionsRequested = Signal()
     usageRangeRequested = Signal(str)
     settingsChanged = Signal(dict)
     movedByUser = Signal()
@@ -2159,12 +2229,24 @@ class ChatWindow(QWidget):
         self.presetsRequested.emit()
 
     def _show_permission_note(self) -> None:
+        self.permissionsRequested.emit()
+
+    def show_permissions(self, options: list[dict], current: str | None) -> None:
         menu = QMenu(self)
         menu.setStyleSheet(menu_style())
-        current = menu.addAction(f"当前：{self._permission_label or '未知'}")
-        current.setEnabled(False)
-        note = menu.addAction("权限在 dsh 客户端里改")
-        note.setEnabled(False)
+        if not options:
+            menu.addAction("这个会话没有权限选项").setEnabled(False)
+        for option in options:
+            value = str(option.get("value") or "")
+            action = menu.addAction(PERMISSION_NAMES.get(value, str(option.get("name") or value)))
+            action.setCheckable(True)
+            action.setChecked(value == current)
+            note = str(option.get("description") or "")
+            if note:
+                action.setToolTip(note)
+            action.triggered.connect(
+                lambda _checked=False, key=value: self.sendRequested.emit("__permission__", key)
+            )
         menu.exec(QCursor.pos())
 
     def show_workspaces(self, spaces: list[dict], current: str | None) -> None:
@@ -2221,13 +2303,7 @@ class ChatWindow(QWidget):
         self.preset_button.setText(f"◎ {names.get(preset or '', preset or '模式')}")
 
     def set_permission_label(self, value: str | None) -> None:
-        names = {
-            "workspace-write": "工作区内修改",
-            "read-only": "只读",
-            "auto": "自动",
-            "full": "完全访问",
-        }
-        self._permission_label = names.get(value or "", value or "")
+        self._permission_label = PERMISSION_NAMES.get(value or "", value or "")
         self.perm_button.setText(f"{self._permission_label or '权限'}⌄")
         self.perm_button.setEnabled(bool(value))
 
@@ -2429,11 +2505,12 @@ class Sprite(QWidget):
 
         # Edge hide state; the animation object is reused for both directions.
         self.edge_hide = bool(self.config.get("edgeHide", False))
-        self._edge: str | None = None      # "left" / "right" while tucked away
+        self._edge: str | None = None      # "left" / "right" / "top" / "bottom"
         self._edge_home = QPoint(0, 0)     # where to slide back to
+        self._edge_x = 0                   # horizontal anchor while tucked
         self._edge_y = 0                   # vertical anchor while tucked
         self._edge_share = "hidden"        # which of the two tucked poses is showing
-        self._swallow_click = False
+        self._pop_on_release = False       # pressed while tucked: pop on release
         self._slide = QPropertyAnimation(self, b"pos", self)
         self._slide.setEasingCurve(QEasingCurve.OutCubic)
         # After a drag the pointer is already inside the window, so there is no
@@ -2652,6 +2729,14 @@ class Sprite(QWidget):
         elif kind == "presets":
             if self.chat_window:
                 self.chat_window.show_presets(payload.get("presets") or [], self._preset)
+        elif kind == "permissions":
+            if self.chat_window:
+                self.chat_window.show_permissions((payload or {}).get("options") or [], (payload or {}).get("current"))
+        elif kind == "setpermission":
+            if self.chat_window:
+                self.chat_window.set_permission_label((payload or {}).get("permission"))
+                self.chat_window.hint.setText("权限已切换")
+                QTimer.singleShot(1600, lambda: self.chat_window.hint.setText(""))
         elif kind == "setworkspace":
             if self.chat_window:
                 self.chat_window.set_workspace_label(self._workspace_title)
@@ -2705,8 +2790,10 @@ class Sprite(QWidget):
             if self.chat_window:
                 self.chat_window.cost_bar.set_usage(None, None, message)
             return
-        if self.chat_window and kind in ("send", "select", "new", "setmodel", "thinking", "history"):
+        if self.chat_window and kind in ("send", "select", "new", "setmodel", "thinking", "history", "setpermission", "setpreset", "presets"):
             self.chat_window.hint.setText(f"{message}")
+            if kind in ("setpermission", "setpreset"):
+                QTimer.singleShot(3000, lambda: self.chat_window.hint.setText(""))
         elif kind in ("setmodel", "thinking"):
             self.say("这个开关没被授权，去 Hana 设置里给桌宠开一下。")
 
@@ -2997,32 +3084,43 @@ class Sprite(QWidget):
         return int(round(self.frame_px - margin - disc * share))
 
     def _edge_target(self, share: float) -> QPoint:
+        """Where the window sits when `share` of the disc is still showing."""
         area = self._screen_area()
         offset = self._edge_offset(share)
-        x = area.left() - offset if self._edge == "left" else area.right() - self.frame_px + 1 + offset
-        return QPoint(x, self._edge_y)
+        if self._edge == "left":
+            return QPoint(area.left() - offset, self._edge_y)
+        if self._edge == "right":
+            return QPoint(area.right() - self.frame_px + 1 + offset, self._edge_y)
+        if self._edge == "top":
+            return QPoint(self._edge_x, area.top() - offset)
+        if self._edge == "bottom":
+            return QPoint(self._edge_x, area.bottom() - self.frame_px + 1 + offset)
+        return self.pos()
 
     def tuck_to_edge(self, cursor: QPoint) -> None:
         """A drag that ends with the pointer against a side leaves a sliver showing.
 
         The side comes from where the pointer is, not from how close the body
         ended up: dragging the pet itself past the edge is a normal gesture, and
-        a large scale easily overshoots.
+        a large scale easily overshoots. All four sides behave the same way.
         """
         if not self.edge_hide:
             return
         area = self._screen_area()
-        left_gap = cursor.x() - area.left()
-        right_gap = area.right() - cursor.x()
-        if min(left_gap, right_gap) > EDGE_SNAP:
+        gaps = {
+            "left": cursor.x() - area.left(),
+            "right": area.right() - cursor.x(),
+            "top": cursor.y() - area.top(),
+            "bottom": area.bottom() - cursor.y(),
+        }
+        side = min(gaps, key=lambda key: gaps[key])
+        if gaps[side] > EDGE_SNAP:
             return
-        self._edge = "left" if left_gap <= right_gap else "right"
+        self._edge = side
         self._edge_share = "hidden"
+        self._edge_x = min(max(self.x(), area.left()), area.right() - self.frame_px + 1)
         self._edge_y = min(max(self.y(), area.top()), area.bottom() - self.frame_px + 1)
-        self._edge_home = QPoint(
-            min(max(self.x(), area.left()), area.right() - self.frame_px + 1),
-            self._edge_y,
-        )
+        self._edge_home = QPoint(self._edge_x, self._edge_y)
         if self.chat_window and self.chat_window.isVisible():
             self.chat_window.hide()
         self._slide_to(self._edge_target(EDGE_HIDDEN), EDGE_MS)
@@ -3048,10 +3146,8 @@ class Sprite(QWidget):
             self._edge_share = "hidden"
             self._slide_to(self._edge_target(EDGE_HIDDEN), EDGE_MS_REVEAL)
 
-    def reveal_from_edge(self) -> bool:
-        """Clicking the sliver pops the pet back in; True if it was tucked away."""
-        if not self._edge:
-            return False
+    def pop_out(self) -> None:
+        """Slide back to where it was before hiding."""
         self._edge = None
         self._edge_timer.stop()
         area = self._screen_area()
@@ -3062,6 +3158,12 @@ class Sprite(QWidget):
         self.state["pos"] = {"x": x, "y": y}
         save_state(self.state)
         self._slide_to(QPoint(x, y), EDGE_MS_REVEAL)
+
+    def reveal_from_edge(self) -> bool:
+        """Pop the pet back out; True if it was tucked away."""
+        if not self._edge:
+            return False
+        self.pop_out()
         return True
 
     def apply_pin(self, mode: str | None = None) -> None:
@@ -3131,19 +3233,18 @@ class Sprite(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            if self.reveal_from_edge():
-                # The click only pulls the pet back in; it must not also open the chat.
-                self._swallow_click = True
-                super().mousePressEvent(event)
-                return
+            if self._edge:
+                # Tucked away: holding the button picks the pet up and it follows
+                # the pointer; letting go without moving is what pops it back out.
+                self._edge = None
+                self._edge_timer.stop()
+                self._pop_on_release = True
             self._press_pos = event.globalPosition().toPoint()
             self._drag_offset = self._press_pos - self.pos()
             self._moved = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        if self._swallow_click:
-            return
         if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
             current = event.globalPosition().toPoint()
             if (current - self._press_pos).manhattanLength() > 4:
@@ -3156,8 +3257,10 @@ class Sprite(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            if self._swallow_click:
-                self._swallow_click = False
+            pop = self._pop_on_release and not self._moved
+            self._pop_on_release = False
+            if pop:
+                self.pop_out()
             elif not self._moved:
                 self.toggle_chat()
             else:
@@ -3441,6 +3544,7 @@ class Sprite(QWidget):
             window.commandRequested.connect(self._on_commands)
             window.workspacesRequested.connect(lambda: self.run_job("workspaces", self.bridge.workspaces, replace=False))
             window.presetsRequested.connect(lambda: self.run_job("presets", self.bridge.presets, replace=False))
+            window.permissionsRequested.connect(lambda: self.run_job("permissions", self.bridge.permissions, replace=False))
             # Resizing from the top-left grip must not fight the placement logic:
             # re-anchoring on every resize made the window jitter against the
             # cursor. It is re-placed only when the pet itself moves.
@@ -3501,6 +3605,10 @@ class Sprite(QWidget):
         if text == "__preset__" and payload:
             self._preset = str(payload)
             self.run_job("setpreset", lambda: self.bridge.set_preset(str(payload)))
+            return
+        if text == "__permission__" and payload:
+            self.run_job("setpermission", lambda: self.bridge.set_permission(str(payload)))
+            return
             return
         if text == "__effort__" and payload:
             self.run_job("thinking", lambda: self.bridge.set_thinking(str(payload)))
