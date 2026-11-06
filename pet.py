@@ -26,7 +26,22 @@ import uuid
 from ctypes import wintypes
 from html import escape
 
-from PySide6.QtCore import QRectF, QObject, QPoint, QPointF, QRect, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QRunnable,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QDesktopServices,
@@ -177,6 +192,13 @@ PIN_MODES = [
     ("yield", "不覆盖全屏窗口"),
     ("always", "强行全局置顶"),
 ]
+
+# Edge hide: drop the pet against a side of the screen and it slides mostly out
+# of sight, leaving this much of the body on show; a click slides it back in.
+EDGE_SNAP = 30                # how close to the edge counts as "against it"
+EDGE_VISIBLE = 1 / 5          # share of the body that stays visible when tucked
+EDGE_MS = 240                 # slide out
+EDGE_MS_REVEAL = 180          # slide back in, a touch quicker
 
 
 # -------------------------------------------------------------- dsh bridge
@@ -2400,7 +2422,14 @@ class Sprite(QWidget):
         self.lid_mode = str(self.config.get("lidMode") or "cpu")
         self.setFixedSize(self.frame_px, self.frame_px)
         self.setCursor(Qt.PointingHandCursor)
-        self._clamp_to_screens()
+
+        # Edge hide state; the animation object is reused for both directions.
+        self.edge_hide = bool(self.config.get("edgeHide", False))
+        self._edge: str | None = None      # "left" / "right" while tucked away
+        self._edge_home = QPoint(0, 0)     # where to slide back to
+        self._swallow_click = False
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._slide.setEasingCurve(QEasingCurve.OutCubic)
 
         self.web = QWebEngineView(self)
         self.web.setGeometry(0, 0, self.frame_px, self.frame_px)
@@ -2435,6 +2464,7 @@ class Sprite(QWidget):
             int(pos.get("x", screen.right() - self.frame_px - 30)),
             int(pos.get("y", screen.bottom() - self.frame_px - 60)),
         )
+        self.keep_on_screen(save=True)
 
         self.bubble = Bubble()
         self.chat_window: ChatWindow | None = None
@@ -2486,6 +2516,14 @@ class Sprite(QWidget):
         self.foreground_check = QTimer(self)
         self.foreground_check.timeout.connect(self.watch_foreground)
         self.foreground_check.start(900)
+
+        # A resolution change or an unplugged monitor leaves the pet somewhere
+        # the user cannot reach it; the window itself gets no event for that, so
+        # its position is re-checked every so often instead.
+        self.screen_timer = QTimer(self)
+        self.screen_timer.timeout.connect(lambda: self.keep_on_screen(save=True))
+        self.screen_timer.start(1500)
+
         QTimer.singleShot(0, lambda: self.apply_pin(self.pin_mode))
 
     # ---------------------------------------------------------- job plumbing
@@ -2904,16 +2942,71 @@ class Sprite(QWidget):
         self.state["pos"] = {"x": self.x(), "y": self.y()}
         save_state(self.state)
 
-    def _clamp_to_screens(self) -> None:
-        rect = QRect(self.x(), self.y(), self.width(), self.height())
-        for screen in QApplication.screens():
-            if screen.availableGeometry().intersects(rect):
-                return
-        area = QApplication.primaryScreen().availableGeometry()
-        self.move(
-            area.right() - self.frame_px - 30,
-            area.bottom() - self.frame_px - 30,
-        )
+    def _screen_area(self) -> QRect:
+        """Work area of the screen the pet mostly sits on, taskbar excluded."""
+        frame = QRect(self.x(), self.y(), self.width(), self.height())
+        screen = QApplication.screenAt(frame.center())
+        if screen is None:
+            best, best_score = None, -1
+            for candidate in QApplication.screens():
+                overlap = candidate.availableGeometry().intersected(frame)
+                score = overlap.width() * overlap.height() if overlap.isValid() else 0
+                if score > best_score:
+                    best, best_score = candidate, score
+            screen = best or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
+    def keep_on_screen(self, save: bool = False) -> None:
+        """Pull the pet back inside after a resolution change, an unplugged
+        monitor, or a drag that ended past the edge."""
+        if self._edge or self._drag_offset is not None:
+            return
+        if self._slide.state() == QPropertyAnimation.Running:
+            return
+        area = self._screen_area()
+        x = min(max(self.x(), area.left()), area.right() - self.width() + 1)
+        y = min(max(self.y(), area.top()), area.bottom() - self.height() + 1)
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+            if save:
+                self.remember_position()
+
+    def _slide_to(self, target: QPoint, duration: int) -> None:
+        self._slide.stop()
+        self._slide.setDuration(duration)
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(target)
+        self._slide.start()
+
+    def tuck_to_edge(self) -> None:
+        """A drag that ends against a side leaves only a sliver of the pet showing."""
+        if not self.edge_hide:
+            return
+        area = self._screen_area()
+        left_gap = self.x() - area.left()
+        right_gap = area.right() - (self.x() + self.width() - 1)
+        if min(left_gap, right_gap) > EDGE_SNAP:
+            return
+        side = "left" if left_gap <= right_gap else "right"
+        exposed = max(10, int(round(self.width() * EDGE_VISIBLE)))
+        y = min(max(self.y(), area.top()), area.bottom() - self.height() + 1)
+        self._edge_home = QPoint(self.x(), y)
+        hidden_x = area.left() + exposed - self.width() if side == "left" else area.right() - exposed + 1
+        self._edge = side
+        if self.chat_window and self.chat_window.isVisible():
+            self.chat_window.hide()
+        self._slide_to(QPoint(hidden_x, y), EDGE_MS)
+
+    def reveal_from_edge(self) -> bool:
+        """Clicking the sliver slides the pet back in; True if it was tucked away."""
+        if not self._edge:
+            return False
+        self._edge = None
+        area = self._screen_area()
+        x = min(max(self._edge_home.x(), area.left()), area.right() - self.width() + 1)
+        y = min(max(self._edge_home.y(), area.top()), area.bottom() - self.height() + 1)
+        self._slide_to(QPoint(x, y), EDGE_MS_REVEAL)
+        return True
 
     def apply_pin(self, mode: str | None = None) -> None:
         """none = ordinary window, yield = on top but steps aside for fullscreen,
@@ -2965,22 +3058,31 @@ class Sprite(QWidget):
             save_config(self.config)
         if self.chat_window and self.chat_window.isVisible():
             self.place_chat()
+        self.keep_on_screen(save=True)
         self.update()
 
     # -------------------------------------------------------------- interact
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
+            if self.reveal_from_edge():
+                # The click only pulls the pet back in; it must not also open the chat.
+                self._swallow_click = True
+                super().mousePressEvent(event)
+                return
             self._press_pos = event.globalPosition().toPoint()
             self._drag_offset = self._press_pos - self.pos()
             self._moved = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._swallow_click:
+            return
         if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
             current = event.globalPosition().toPoint()
             if (current - self._press_pos).manhattanLength() > 4:
                 self._moved = True
+                self._slide.stop()
             self.move(current - self._drag_offset)
             if self.chat_window and self.chat_window.isVisible():
                 self.place_chat()
@@ -2988,10 +3090,13 @@ class Sprite(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            if not self._moved:
+            if self._swallow_click:
+                self._swallow_click = False
+            elif not self._moved:
                 self.toggle_chat()
             else:
                 self.remember_position()
+                self.tuck_to_edge()
             self._drag_offset = None
         super().mouseReleaseEvent(event)
 
@@ -3039,6 +3144,10 @@ class Sprite(QWidget):
             action.triggered.connect(lambda _checked=False, value=key: self.apply_pin(value))
             pin_group.addAction(action)
             self._pin_actions[key] = action
+
+        edge_action = menu.addAction("贴边隐藏")
+        edge_action.setCheckable(True)
+        edge_action.setChecked(self.edge_hide)
 
         autostart_action = menu.addAction("开机自启")
         autostart_action.setCheckable(True)
@@ -3154,6 +3263,13 @@ class Sprite(QWidget):
             self.gaze_enabled = gaze_action.isChecked()
             self.config["gaze"] = self.gaze_enabled
             save_config(self.config)
+        elif chosen == edge_action:
+            self.edge_hide = edge_action.isChecked()
+            self.config["edgeHide"] = self.edge_hide
+            save_config(self.config)
+            if not self.edge_hide:
+                self.reveal_from_edge()
+            self.say("贴边隐藏已打开" if self.edge_hide else "贴边隐藏已关闭")
         elif chosen == autostart_action:
             wanted = autostart_action.isChecked()
             if set_autostart(wanted):
