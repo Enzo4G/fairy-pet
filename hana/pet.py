@@ -104,6 +104,7 @@ ASSETS = os.path.join(RESOURCE_DIR, "assets")
 CONFIG_DIR = os.path.join(HERE, "FairyPet")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 STATE_PATH = os.path.join(CONFIG_DIR, "state.json")
+LOG_PATH = os.path.join(CONFIG_DIR, "fairy.log")
 HANA_HOME = os.path.join(os.path.expanduser("~"), ".hanako")
 
 # Task Manager names a process after its file, so the bundled Chromium helper is
@@ -141,7 +142,7 @@ LID_MODES = [
 # block, so a fork that wants to hide the credits has to edit code instead of
 # just deleting a menu entry.
 APP_TITLE = "Fairy 桌宠"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 AUTHOR = "Enzo_4G"
 PROJECT_URL = "https://github.com/Enzo4G/fairy-pet"   # 仓库地址，留空则不显示「项目地址」按钮
 CREDIT_NAME = "Chengzhibense / Fairy-DSH"
@@ -626,33 +627,146 @@ def _process_exe(pid: int) -> str:
 
 
 def bring_hana_to_front() -> bool:
-    """Raise Hana's own window. Matching the title is not enough — a browser tab
-    that merely mentions HanaAgent would win — so match the executable."""
+    """Raise Hana's own window — including one the tray has hidden.
+
+    Matching the title is not enough (a browser tab that merely mentions
+    HanaAgent would win), so the window's process executable is what gets
+    matched. Windows are enumerated whether visible or not: an app parked in the
+    tray keeps its main window around in a hidden state, and showing that window
+    is exactly what "打开窗口" has to do.
+    """
+    handles = [hwnd for hwnd, _pid in _client_windows("hanaagent")]
+    if not handles:
+        return False
     user32 = ctypes.windll.user32
-    found = []
+    best, best_score = handles[0], -1
+    for hwnd in handles:
+        rect = _RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+        score = (2 if user32.IsWindowVisible(hwnd) else 0) + (1 if area > 200_000 else 0)
+        if score > best_score:
+            best, best_score = hwnd, score
+    return _raise_window(best)
+
+
+def _client_windows(exe_prefix: str) -> list[tuple[int, int]]:
+    """Every titled top-level window owned by a process whose exe starts with
+    `exe_prefix`, visible or hidden."""
+    user32 = ctypes.windll.user32
+    found: list[tuple[int, int]] = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def visit(hwnd, _lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
         if user32.GetWindowTextLengthW(hwnd) <= 0:
             return True
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         exe = os.path.basename(_process_exe(pid.value)).lower()
-        if exe.startswith("hanaagent"):
-            found.append(hwnd)
+        if exe.startswith(exe_prefix):
+            found.append((hwnd, pid.value))
         return True
 
     user32.EnumWindows(visit, 0)
-    if not found:
-        return False
-    hwnd = found[0]
+    return found
+
+
+def _raise_window(hwnd) -> bool:
+    """Show a tray-hidden window, restore a minimized one, and put it in front."""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
     if user32.IsIconic(hwnd):
-        user32.ShowWindow(hwnd, 9)
-    user32.ShowWindow(hwnd, 5)
+        user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+    elif not user32.IsWindowVisible(hwnd):
+        user32.ShowWindow(hwnd, 5)          # SW_SHOW
+    if user32.SetForegroundWindow(hwnd):
+        return True
+    # Windows refuses focus changes from a background process; borrowing the
+    # foreground thread's input queue is the documented way around that.
+    foreground = user32.GetForegroundWindow()
+    target = user32.GetWindowThreadProcessId(foreground, None)
+    current = kernel32.GetCurrentThreadId()
+    if not target or target == current:
+        return False
+    user32.AttachThreadInput(target, current, True)
+    user32.BringWindowToTop(hwnd)
     user32.SetForegroundWindow(hwnd)
+    user32.AttachThreadInput(target, current, False)
     return True
+
+
+def _client_exe_path(names: tuple[str, ...], config: dict) -> str:
+    """Find the client's executable: remembered path, running process, installer
+    record, then the usual install folders. Empty when nothing turned up."""
+    remembered = str(config.get("clientExe") or "")
+    if remembered and os.path.exists(remembered):
+        return remembered
+    prefix = names[0].lower()
+    for _hwnd, pid in _client_windows(prefix):
+        path = _process_exe(pid)
+        if path and os.path.exists(path):
+            return path
+    path = _registry_client_path(names)
+    if path:
+        return path
+    program_files = [os.environ.get("LOCALAPPDATA", ""), os.environ.get("PROGRAMFILES", ""),
+                     os.environ.get("PROGRAMFILES(X86)", "")]
+    for root in program_files:
+        if not root:
+            continue
+        for folder in ("Programs", ""):
+            base = os.path.join(root, folder) if folder else root
+            for name in names:
+                candidate = os.path.join(base, name, f"{name}.exe")
+                if os.path.exists(candidate):
+                    return candidate
+    return ""
+
+
+def _registry_client_path(names: tuple[str, ...]) -> str:
+    """Read the uninstall record an installer leaves behind."""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    roots = [
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+    for root, key_path in roots:
+        try:
+            with winreg.OpenKey(root, key_path) as key:
+                count = winreg.QueryInfoKey(key)[0]
+                for index in range(count):
+                    try:
+                        sub_name = winreg.EnumKey(key, index)
+                        with winreg.OpenKey(key, sub_name) as sub:
+                            try:
+                                display = str(winreg.QueryValueEx(sub, "DisplayName")[0])
+                            except OSError:
+                                continue
+                            if not any(name.lower() in display.lower() for name in names):
+                                continue
+                            for value_name in ("DisplayIcon", "InstallLocation"):
+                                try:
+                                    value = str(winreg.QueryValueEx(sub, value_name)[0])
+                                except OSError:
+                                    continue
+                                path = value.split(",")[0].strip('"').strip()
+                                if path.lower().endswith(".exe") and os.path.exists(path):
+                                    return path
+                                if os.path.isdir(path):
+                                    for entry in os.listdir(path):
+                                        if entry.lower().endswith(".exe") and any(
+                                            name.lower() in entry.lower() for name in names
+                                        ):
+                                            return os.path.join(path, entry)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return ""
 
 
 # ------------------------------------------------------------------ utilities
@@ -695,6 +809,36 @@ def save_config(data: dict) -> None:
             json.dump(data, handle)
     except Exception:
         pass
+
+
+def log(message: str) -> None:
+    """Append one timestamped line to `FairyPet\\fairy.log`.
+
+    The windowed build has no console, so a refused request or a crash would
+    otherwise leave nothing behind. One previous file is kept, 512 KB each.
+    """
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 512 * 1024:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {message}\n")
+    except Exception:
+        pass
+
+
+def install_crash_log() -> None:
+    """Send uncaught exceptions to the log before they vanish."""
+
+    def hook(kind, value, tb) -> None:
+        import traceback
+
+        text = "".join(traceback.format_exception(kind, value, tb)).strip()
+        log(f"未捕获异常：\n{text}")
+        sys.__excepthook__(kind, value, tb)
+
+    sys.excepthook = hook
 
 
 def shirt_icon(color: str = TEXT) -> QIcon:
@@ -2099,6 +2243,7 @@ class Sprite(QWidget):
             self.run_job("history", lambda: self.bridge.history())
 
     def _on_job_err(self, kind: str, message: str) -> None:
+        log(f"任务失败 [{kind}]：{message}")
         self.inflight.discard(kind)
         if kind == "state":
             # Hana owns this process; when its server stops answering, quit.
@@ -2611,6 +2756,30 @@ class Sprite(QWidget):
         self._load_attachments(paths)
         event.acceptProposedAction()
 
+    def open_client(self) -> None:
+        """Show Hana — or start it when it is not running at all."""
+        if bring_hana_to_front():
+            log("把 Hana 窗口叫到前台")
+            return
+        path = _client_exe_path(("HanaAgent",), self.config)
+        log(f"没找到 Hana 窗口，准备启动：{path or '路径未找到'}")
+        if not path:
+            path = QFileDialog.getOpenFileName(None, "找不到 HanaAgent，选一下它的 exe", "", "程序 (*.exe)")[0]
+            if not path:
+                return
+            self.config["clientExe"] = path
+            save_config(self.config)
+            log(f"用户指定了 HanaAgent 路径：{path}")
+        try:
+            subprocess.Popen([path], cwd=os.path.dirname(path))
+        except Exception as error:
+            log(f"启动 HanaAgent 失败：{error}")
+            self.say("启动失败，路径可能不对")
+            return
+        self.say("Hana 正在启动…")
+        for delay in (5000, 10000):
+            QTimer.singleShot(delay, bring_hana_to_front)
+
     def ask_credentials(self) -> None:
         """One window: log in once inside the pet, the session is kept on disk."""
         dialog = AccountWindow(self.account)
@@ -2780,8 +2949,7 @@ class Sprite(QWidget):
         elif chosen == hide_action:
             self.set_visible(False)
         elif chosen == hana_action:
-            if not bring_hana_to_front():
-                self.say("没找到 Hana 的窗口。")
+            self.open_client()
         elif chosen == quit_action:
             QApplication.quit()
 
@@ -3020,7 +3188,12 @@ def main() -> int:
     from PySide6.QtCore import QCoreApplication
 
     if not acquire_single_instance():
+        log("另一个实例已在运行，本次启动退出")
         return 0
+    install_crash_log()
+    package = "frozen" if getattr(sys, "frozen", False) else "source"
+    log(f"启动 {APP_TITLE} {APP_VERSION}（{package}），程序目录 {HERE}")
+    log(f"配置目录 {CONFIG_DIR}")
 
     os.environ.setdefault(
         "QTWEBENGINE_CHROMIUM_FLAGS",
