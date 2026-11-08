@@ -152,7 +152,7 @@ ACCENT = "#4d8fd6"
 # block, so a fork that wants to hide the credits has to edit code instead of
 # just deleting a menu entry.
 APP_TITLE = "Fairy 桌宠"
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 AUTHOR = "Enzo_4G"
 PROJECT_URL = "https://github.com/Enzo4G/fairy-pet"   # 仓库地址，留空则不显示「项目地址」按钮
 CREDIT_NAME = "Chengzhibense / Fairy-DSH"
@@ -3498,19 +3498,33 @@ class Sprite(QWidget):
         event.acceptProposedAction()
 
     def open_client(self) -> None:
-        """Show the client — or start it when it is not running at all."""
-        if bring_dsh_to_front():
+        """Show the client — or start it when it is not running at all.
+
+        A window the client hid to the tray can be made visible with ShowWindow,
+        but Electron still believes it is hidden: it keeps painting and swallows
+        every click. The app's own way back is the single-instance handoff —
+        launching the exe again makes the running copy focus its window. A
+        merely minimized window can be restored from outside.
+        """
+        user32 = ctypes.windll.user32
+        windows = _client_windows("deepseek harness")
+        reachable = [h for h, _p in windows if user32.IsWindowVisible(h) or user32.IsIconic(h)]
+        if reachable and bring_dsh_to_front():
             log("把 dsh 窗口叫到前台")
             return
-        # The process can be alive with a window that refuses to show. Starting
-        # another copy then leaves a second, permanently blank window behind, so
-        # a live process is never launched twice.
-        if _client_windows("deepseek harness"):
-            log("dsh 在跑但窗口没起来，不重复启动")
-            self.say("dsh 在跑，窗口没起来，再点一次")
-            return
         path = _client_exe_path(("DeepSeek Harness",), self.config)
-        log(f"没找到 dsh 窗口，准备启动：{path or '路径未找到'}")
+        if windows and path:
+            log(f"窗口藏在托盘里，走单实例交接：{path}")
+            try:
+                subprocess.Popen([path], cwd=os.path.dirname(path))
+            except Exception as error:
+                log(f"交接启动失败：{error}")
+            else:
+                self.say("dsh 正在恢复…")
+                for delay in (2500, 6000):
+                    QTimer.singleShot(delay, bring_dsh_to_front)
+                return
+        log(f"没有可用窗口，准备启动：{path or '路径未找到'}")
         if not path:
             path = QFileDialog.getOpenFileName(None, "找不到 dsh，选一下它的 exe", "", "程序 (*.exe)")[0]
             if not path:
@@ -3525,7 +3539,7 @@ class Sprite(QWidget):
             self.say("启动失败，路径可能不对")
             return
         self.say("dsh 正在启动…")
-        for delay in (5000, 10000):
+        for delay in (6000, 12000):
             QTimer.singleShot(delay, bring_dsh_to_front)
 
     def ask_credentials(self) -> None:
