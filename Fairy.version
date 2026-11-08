@@ -2,8 +2,8 @@
 # 文件名（Fairy.exe）决定进程名，FileDescription 决定任务管理器与属性页里的描述。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 0, 2, 0),
-    prodvers=(2, 0, 2, 0),
+    filevers=(2, 0, 3, 0),
+    prodvers=(2, 0, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,12 +16,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'Enzo_4G'),
         StringStruct('FileDescription', 'Fairy'),
-        StringStruct('FileVersion', '2.0.2.0'),
+        StringStruct('FileVersion', '2.0.3.0'),
         StringStruct('InternalName', 'Fairy'),
         StringStruct('LegalCopyright', 'Copyright (C) 2026 Enzo_4G'),
         StringStruct('OriginalFilename', 'Fairy.exe'),
         StringStruct('ProductName', 'Fairy'),
-        StringStruct('ProductVersion', '2.0.2.0')
+        StringStruct('ProductVersion', '2.0.3.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

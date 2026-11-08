@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import html
 import json
 import math
@@ -142,7 +143,7 @@ LID_MODES = [
 # block, so a fork that wants to hide the credits has to edit code instead of
 # just deleting a menu entry.
 APP_TITLE = "Fairy 桌宠"
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 AUTHOR = "Enzo_4G"
 PROJECT_URL = "https://github.com/Enzo4G/fairy-pet"   # 仓库地址，留空则不显示「项目地址」按钮
 CREDIT_NAME = "Chengzhibense / Fairy-DSH"
@@ -635,19 +636,32 @@ def bring_hana_to_front() -> bool:
     tray keeps its main window around in a hidden state, and showing that window
     is exactly what "打开窗口" has to do.
     """
-    handles = [hwnd for hwnd, _pid in _client_windows("hanaagent")]
+    handles = [
+        hwnd
+        for hwnd, _pid in _client_windows("hanaagent")
+    ]
     if not handles:
+        log("没找到 HanaAgent 的窗口")
         return False
     user32 = ctypes.windll.user32
-    best, best_score = handles[0], -1
+    ranked = []
     for hwnd in handles:
         rect = _RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
         area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
-        score = (2 if user32.IsWindowVisible(hwnd) else 0) + (1 if area > 200_000 else 0)
-        if score > best_score:
-            best, best_score = hwnd, score
-    return _raise_window(best)
+        ranked.append((1 if user32.IsWindowVisible(hwnd) else 0, area, hwnd))
+    # Biggest and already-visible first; the rest are fallbacks. Every candidate
+    # gets raised — Hana keeps more than one top-level window ("HanaAgent" and
+    # one per agent), and "打开窗口" has to work no matter which one got hidden.
+    # Raising in reverse leaves the largest window in front.
+    ranked.sort(reverse=True)
+    raised = False
+    for _visible, _area, hwnd in reversed(ranked[:4]):
+        if _raise_window(hwnd):
+            raised = True
+    if not raised:
+        log("HanaAgent 有窗口，但一个也没叫得起来")
+    return raised
 
 
 def _client_windows(exe_prefix: str) -> list[tuple[int, int]]:
@@ -659,6 +673,13 @@ def _client_windows(exe_prefix: str) -> list[tuple[int, int]]:
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def visit(hwnd, _lparam):
         if user32.GetWindowTextLengthW(hwnd) <= 0:
+            return True
+        # Child windows are menus, IME frames and input-method helpers that
+        # happen to belong to the same process; showing one of those is exactly
+        # the "I clicked and nothing happened" that this has to avoid.
+        if user32.GetParent(hwnd):
+            return True
+        if user32.GetWindowLongW(hwnd, -20) & 0x00000080:  # WS_EX_TOOLWINDOW
             return True
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -677,22 +698,36 @@ def _raise_window(hwnd) -> bool:
     kernel32 = ctypes.windll.kernel32
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, 9)          # SW_RESTORE
-    elif not user32.IsWindowVisible(hwnd):
+    else:
         user32.ShowWindow(hwnd, 5)          # SW_SHOW
-    if user32.SetForegroundWindow(hwnd):
-        return True
-    # Windows refuses focus changes from a background process; borrowing the
-    # foreground thread's input queue is the documented way around that.
-    foreground = user32.GetForegroundWindow()
-    target = user32.GetWindowThreadProcessId(foreground, None)
-    current = kernel32.GetCurrentThreadId()
-    if not target or target == current:
-        return False
-    user32.AttachThreadInput(target, current, True)
-    user32.BringWindowToTop(hwnd)
-    user32.SetForegroundWindow(hwnd)
-    user32.AttachThreadInput(target, current, False)
-    return True
+    if not user32.IsWindowVisible(hwnd):
+        # Electron apps sometimes swallow the first show request; asking again
+        # as a restore is the attempt that sticks.
+        user32.ShowWindow(hwnd, 9)
+    if not user32.SetForegroundWindow(hwnd):
+        # Windows refuses focus changes from a background process; borrowing the
+        # foreground thread's input queue is the documented way around that.
+        foreground = user32.GetForegroundWindow()
+        target = user32.GetWindowThreadProcessId(foreground, None)
+        current = kernel32.GetCurrentThreadId()
+        if target and target != current:
+            user32.AttachThreadInput(target, current, True)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.AttachThreadInput(target, current, False)
+    visible = bool(user32.IsWindowVisible(hwnd)) and not user32.IsIconic(hwnd)
+    foreground = user32.GetForegroundWindow() == hwnd
+    if visible and not foreground:
+        # Last resort: the same call the taskbar button makes.
+        try:
+            user32.SwitchToThisWindow(hwnd, True)
+            foreground = user32.GetForegroundWindow() == hwnd
+        except Exception:
+            pass
+    log(f"唤起窗口 {hwnd}：可见={visible} 前台={foreground}")
+    # Visible is what the user judges by; a window that came up behind is still
+    # a win compared to saying nothing happened.
+    return visible
 
 
 def _client_exe_path(names: tuple[str, ...], config: dict) -> str:
@@ -2789,8 +2824,36 @@ class Sprite(QWidget):
         self.usage_cache.clear()
         self.refresh_usage(force=True)
 
+    POLL_TIMERS = (
+        "gaze_timer",
+        "metrics_timer",
+        "usage_timer",
+        "foreground_check",
+        "screen_timer",
+        "_edge_timer",
+    )
+
+    def _pause_polls(self, pause: bool) -> None:
+        """Hold the background timers while the menu runs its own event loop.
+
+        Every one of them ends up drawing into the WebEngine view, and leaving
+        them ticking under `menu.exec()` is what made the menu feel sticky.
+        """
+        for name in self.POLL_TIMERS:
+            timer = getattr(self, name, None)
+            if timer is None:
+                continue
+            if pause:
+                timer.stop()
+            else:
+                timer.start()
+
     def contextMenuEvent(self, event) -> None:
-        menu = QMenu(self)
+        # Parentless on purpose: a parented QMenu becomes a child of the pet
+        # window and is never destroyed, so every right-click used to leave a
+        # whole menu tree behind and the next one opened slower.
+        menu = QMenu(None)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
         menu.setStyleSheet(menu_style())
 
         about_action = menu.addAction("关于")
@@ -2921,12 +2984,24 @@ class Sprite(QWidget):
         menu.addSeparator()
         quit_action = menu.addAction("退出")
 
-        chosen = menu.exec(event.globalPos())
+        chosen = None
+        self._pause_polls(True)
+        try:
+            chosen = menu.exec(event.globalPos())
+        finally:
+            self._pause_polls(False)
+            menu.deleteLater()
         if chosen == about_action:
-            dialog = AboutWindow(None)
-            if self.pin_mode != "none":
-                dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-            dialog.exec()
+            try:
+                dialog = AboutWindow(None)
+                if self.pin_mode != "none":
+                    dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+                dialog.exec()
+            except Exception as error:
+                # A windowed build has nowhere to print a traceback; without
+                # this the item just looked dead.
+                log(f"关于窗口打不开：{error!r}")
+                self.say("关于窗口打不开，看一下 fairy.log")
         elif chosen == gaze_action:
             self.gaze_enabled = gaze_action.isChecked()
             self.config["gaze"] = self.gaze_enabled

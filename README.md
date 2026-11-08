@@ -49,12 +49,12 @@
 
 ### 方式一：下载 exe（推荐给普通用户）
 
-到 [Releases](../../releases) 下载 `Fairy-v2.0.2-win64.zip`，解压后双击 `Fairy.exe`。
+到 [Releases](../../releases) 下载 `Fairy-v2.0.3-win64.zip`，解压后双击 `Fairy.exe`。
 无需安装 Python；配置会写在与 exe 同级的 `FairyPet\` 目录里。
 
 > 首次启动会向系统申请网络访问（本机 127.0.0.1），用于和 dsh 通信。
 >
-> HanaAgent 版单独一个包：`Fairy-Hana-v2.0.2-win64.zip`，解压后双击 `FairyHana.exe`，
+> HanaAgent 版单独一个包：`Fairy-Hana-v2.0.3-win64.zip`，解压后双击 `FairyHana.exe`，
 > 前提是本机的 HanaAgent 里装着 fairy-pet 这个 App。
 
 ### 方式二：从源码运行
