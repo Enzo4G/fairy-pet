@@ -2022,6 +2022,10 @@ class ChatWindow(QWidget):
         self._signature = None
         self._render()
 
+    def has_messages(self) -> bool:
+        """True once a real conversation has been painted in."""
+        return bool(self._messages)
+
     def set_messages(self, messages: list[dict], working: bool) -> None:
         self._messages = [dict(m) for m in (messages or [])]
         self._working = bool(working)
@@ -2155,7 +2159,7 @@ class Sprite(QWidget):
         self._drag_offset = None
         self._moved = False
         self._working = False
-        self._user_hidden = False
+        self._chat_session = None
         self._auto_hidden = False
 
         self.state = load_state()
@@ -2275,9 +2279,22 @@ class Sprite(QWidget):
             self._apply_state(payload or {})
         elif kind == "sessions":
             if self.chat_window:
-                self.chat_window.set_sessions(payload.get("sessions") or [], payload.get("current"))
+                sessions = payload.get("sessions") or []
+                current = payload.get("current")
+                self.chat_window.set_sessions(sessions, current)
+                # Hana's own window can switch conversation while the pet is
+                # closed; if that happened, what the panel holds belongs to a
+                # different conversation and a fresh read is due.
+                if (
+                    current
+                    and current != self._chat_session
+                    and self.chat_window.isVisible()
+                    and not self._working
+                ):
+                    self.run_job("history", lambda sid=current: self.bridge.history(sid))
         elif kind == "history":
             if self.chat_window:
+                self._chat_session = payload.get("sessionId") or self._chat_session
                 self.chat_window.set_messages(payload.get("messages") or [], self._working)
         elif kind == "send":
             self._working = True
@@ -2546,10 +2563,16 @@ class Sprite(QWidget):
         self.run_job("metrics", self.metrics.sample, replace=False)
 
     def _history_after_turn(self) -> None:
-        if self._working:
-            return
+        """Read the conversation once the turn has finished writing it out."""
         if not (self.chat_window and self.chat_window.isVisible()):
             return
+        if self._working:
+            # The turn is still running; a read now would race Hana's rewrite.
+            self._history_retries = getattr(self, "_history_retries", 0) + 1
+            if self._history_retries <= 8:
+                QTimer.singleShot(2000, self._history_after_turn)
+            return
+        self._history_retries = 0
         self.run_job("history", lambda: self.bridge.history())
 
     # ------------------------------------------------------------ positioning
@@ -3182,11 +3205,19 @@ class Sprite(QWidget):
             window.usageRangeRequested.connect(self.on_usage_range)
             window.settingsChanged.connect(self._save_theme)
             self.chat_window = window
-        self.chat_window.set_messages([], False)
+        # Keep whatever the window already shows. Wiping it here was why opening
+        # the window mid-turn left a blank panel: the turn blocks the history
+        # read, so there was nothing to put back.
+        if not self.chat_window.has_messages():
+            self.chat_window.set_messages([], False)
         self.run_job("sessions", self.bridge.sessions)
         if self._working:
-            # the turn is mid-write: wait until it settles, then read once
-            QTimer.singleShot(1200, self._history_after_turn)
+            # Reading a session while Hana is rewriting it can break its save, so
+            # the panel shows the last conversation and refreshes when the turn
+            # settles.
+            if not self.chat_window.has_messages():
+                self.chat_window.hint.setText("正在生成，结束后自动刷新")
+            QTimer.singleShot(1500, self._history_after_turn)
         else:
             self.run_job("history", lambda: self.bridge.history())
         self.js("pet.blink()")
