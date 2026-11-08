@@ -152,7 +152,7 @@ ACCENT = "#4d8fd6"
 # block, so a fork that wants to hide the credits has to edit code instead of
 # just deleting a menu entry.
 APP_TITLE = "Fairy 桌宠"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 AUTHOR = "Enzo_4G"
 PROJECT_URL = "https://github.com/Enzo4G/fairy-pet"   # 仓库地址，留空则不显示「项目地址」按钮
 CREDIT_NAME = "Chengzhibense / Fairy-DSH"
@@ -1102,6 +1102,29 @@ def _process_exe(pid: int) -> str:
         kernel32.CloseHandle(handle)
 
 
+_LAST_CLIENT_HWND = 0
+
+
+def note_client_window() -> None:
+    """Remember which of the client's windows is the one actually in use.
+
+    Electron clients keep spare Chromium windows around that never finish
+    loading; they paint solid white and have no way to close them. Raising "the
+    biggest one" once put such a window on screen instead of the app, so the
+    window the user actually focused last is what gets raised from then on.
+    """
+    global _LAST_CLIENT_HWND
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    exe = os.path.basename(_process_exe(pid.value)).lower()
+    if exe.startswith("deepseek harness"):
+        _LAST_CLIENT_HWND = int(hwnd)
+
+
 def bring_dsh_to_front() -> bool:
     """Raise the dsh client window — including one the tray has hidden.
 
@@ -1112,28 +1135,39 @@ def bring_dsh_to_front() -> bool:
     "打开客户端" has to do.
     """
     handles = [hwnd for hwnd, _pid in _client_windows("deepseek harness")]
+    user32 = ctypes.windll.user32
+    # The window dsh was last used through, if we have seen it: exactly one
+    # window gets shown, because a spare blank one would also come up.
+    remembered = _LAST_CLIENT_HWND
+    if remembered and user32.IsWindow(remembered) and _raise_window(remembered):
+        return True
     if not handles:
         log("没找到 dsh 的窗口")
         return False
-    user32 = ctypes.windll.user32
     ranked = []
     for hwnd in handles:
         rect = _RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
         area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
-        ranked.append((1 if user32.IsWindowVisible(hwnd) else 0, area, hwnd))
-    # Biggest and already-visible first; the rest are fallbacks. Every candidate
-    # gets raised — the client keeps more than one top-level window, and the
-    # "open client" item has to work no matter which one got hidden. Raising in
-    # reverse leaves the largest window in front.
+        title = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(hwnd, title, 512)
+        ranked.append(
+            (
+                1 if user32.IsWindowVisible(hwnd) else 0,
+                1 if title.value.strip().lower() == "deepseek harness" else 0,
+                area,
+                hwnd,
+                title.value,
+            )
+        )
+    # Visible first, then the window named after the product, then the bigger.
     ranked.sort(reverse=True)
-    raised = False
-    for _visible, _area, hwnd in reversed(ranked[:4]):
+    for _visible, _named, _area, hwnd, title in ranked[:3]:
         if _raise_window(hwnd):
-            raised = True
-    if not raised:
-        log("dsh 有窗口，但一个也没叫得起来")
-    return raised
+            log(f"没有记住的窗口，抬起《{title}》")
+            return True
+    log("dsh 有窗口，但一个也没叫得起来")
+    return False
 
 
 def _client_windows(exe_prefix: str) -> list[tuple[int, int]]:
@@ -3200,6 +3234,7 @@ class Sprite(QWidget):
         return handles
 
     def watch_foreground(self) -> None:
+        note_client_window()
         if self.pin_mode != "yield":
             return
         try:
@@ -3466,6 +3501,13 @@ class Sprite(QWidget):
         """Show the client — or start it when it is not running at all."""
         if bring_dsh_to_front():
             log("把 dsh 窗口叫到前台")
+            return
+        # The process can be alive with a window that refuses to show. Starting
+        # another copy then leaves a second, permanently blank window behind, so
+        # a live process is never launched twice.
+        if _client_windows("deepseek harness"):
+            log("dsh 在跑但窗口没起来，不重复启动")
+            self.say("dsh 在跑，窗口没起来，再点一次")
             return
         path = _client_exe_path(("DeepSeek Harness",), self.config)
         log(f"没找到 dsh 窗口，准备启动：{path or '路径未找到'}")

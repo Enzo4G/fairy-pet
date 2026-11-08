@@ -31,7 +31,7 @@ Hana 的会话列表由**客户端**自己维护，外部进程建出来的会�
 ## 运行
 
 **推荐：直接用打包好的。** 从 [Releases](../../releases) 下载
-`Fairy-Hana-v2.0.3-win64.zip`，解压后双击 `FairyHana.exe`。不需要装 Python。
+`Fairy-Hana-v2.0.4-win64.zip`，解压后双击 `FairyHana.exe`。不需要装 Python。
 
 从源码跑（环境与 dsh 版共用，装一次即可）：
 
