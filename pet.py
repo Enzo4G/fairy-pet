@@ -3270,12 +3270,45 @@ class Sprite(QWidget):
             screen = best or QApplication.primaryScreen()
         return screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
 
+    def default_position(self) -> QPoint:
+        """Bottom-right corner of the primary screen — where a fresh install sits."""
+        screen = QApplication.primaryScreen()
+        area = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        return QPoint(area.right() - self.frame_px - 30, area.bottom() - self.frame_px - 60)
+
+    def reset_position(self, reason: str = "") -> None:
+        """Put the pet back at its default corner.
+
+        After a resolution or display-scale change the saved coordinates belong
+        to a desktop that no longer exists, and a pet clamped to “a third still
+        reachable” can end up a sliver in a corner nobody thinks to look at.
+        """
+        self._slide.stop()
+        self._edge = None
+        self._edge_timer.stop()
+        point = self.default_position()
+        self.move(point)
+        self.remember_position()
+        log(f"宠物回到默认位置 {point.x()},{point.y()}（{reason}）")
+        if not self._user_hidden and not self.isVisible():
+            self.show()
+
     def keep_on_screen(self, save: bool = False) -> None:
         """Pull the pet back when less than a third of it is still reachable —
         after a resolution change, an unplugged monitor or a drag into the void."""
         if self._edge or self._drag_offset is not None:
             return
         if self._slide.state() == QPropertyAnimation.Running:
+            return
+        frame = QRect(self.x(), self.y(), self.width(), self.height())
+        reachable = 0
+        for screen in QApplication.screens():
+            overlap = screen.availableGeometry().intersected(frame)
+            if overlap.isValid():
+                reachable = max(reachable, overlap.width() * overlap.height())
+        if reachable == 0:
+            # No part of it is on any screen: clamping cannot help, go home.
+            self.reset_position("完全不在屏幕内")
             return
         area = self._screen_area()
         keep = int(round(self.frame_px * ON_SCREEN_SHARE))
@@ -3997,9 +4030,11 @@ class Tray(QSystemTrayIcon):
         menu.setStyleSheet(menu_style())
         show_action = menu.addAction("显示宠物")
         chat_action = menu.addAction("打开对话")
+        home_action = menu.addAction("回到默认位置")
         quit_action = menu.addAction("退出")
         show_action.triggered.connect(lambda: sprite.set_visible(True))
         chat_action.triggered.connect(lambda: (sprite.set_visible(True), sprite.open_chat()))
+        home_action.triggered.connect(lambda: (sprite.set_visible(True), sprite.reset_position("托盘菜单")))
         quit_action.triggered.connect(QApplication.quit)
         self.setContextMenu(menu)
         self.activated.connect(self._activated)
