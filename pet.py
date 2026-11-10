@@ -1264,6 +1264,37 @@ def _client_exe_path(names: tuple[str, ...], config: dict) -> str:
     return ""
 
 
+def _looks_like_client(path: str) -> bool:
+    """Reject uninstallers and updaters that also carry the product name."""
+    name = os.path.basename(path).lower()
+    if not name.endswith(".exe"):
+        return False
+    return not any(bad in name for bad in ("unins", "uninstall", "update", "setup", "crashpad", "helper"))
+
+
+def _launch_client(path: str) -> bool:
+    """Start the client the way Explorer would.
+
+    Some clients are marked “run as administrator” in the per-user compatibility
+    flags (`AppCompatFlags\Layers`), and then a plain CreateProcess dies with
+    WinError 740 while nothing happens. Going through the shell lets Windows
+    show its own consent prompt — what double-clicking the exe does.
+    """
+    try:
+        os.startfile(path)
+        log(f"通过 shell 启动：{path}")
+        return True
+    except OSError as error:
+        log(f"shell 启动失败（{error}），改用直接启动")
+    try:
+        subprocess.Popen([path], cwd=os.path.dirname(path))
+        log(f"直接启动：{path}")
+        return True
+    except Exception as error:
+        log(f"启动失败：{path} — {error}")
+        return False
+
+
 def _registry_client_path(names: tuple[str, ...]) -> str:
     """Read the uninstall record an installer leaves behind."""
     try:
@@ -1295,11 +1326,11 @@ def _registry_client_path(names: tuple[str, ...]) -> str:
                                 except OSError:
                                     continue
                                 path = value.split(",")[0].strip('"').strip()
-                                if path.lower().endswith(".exe") and os.path.exists(path):
+                                if _looks_like_client(path) and os.path.exists(path):
                                     return path
                                 if os.path.isdir(path):
                                     for entry in os.listdir(path):
-                                        if entry.lower().endswith(".exe") and any(
+                                        if _looks_like_client(entry) and any(
                                             name.lower() in entry.lower() for name in names
                                         ):
                                             return os.path.join(path, entry)
@@ -3548,32 +3579,42 @@ class Sprite(QWidget):
         path = _client_exe_path(("DeepSeek Harness",), self.config)
         if windows and path:
             log(f"窗口藏在托盘里，走单实例交接：{path}")
-            try:
-                subprocess.Popen([path], cwd=os.path.dirname(path))
-            except Exception as error:
-                log(f"交接启动失败：{error}")
-            else:
+            if _launch_client(path):
                 self.say("dsh 正在恢复…")
                 for delay in (2500, 6000):
                     QTimer.singleShot(delay, bring_dsh_to_front)
                 return
+            self.say("需要管理员授权，允许一下 UAC 提示")
+            return
         log(f"没有可用窗口，准备启动：{path or '路径未找到'}")
         if not path:
-            path = QFileDialog.getOpenFileName(None, "找不到 dsh，选一下它的 exe", "", "程序 (*.exe)")[0]
+            path = self.pick_client_path()
             if not path:
                 return
-            self.config["clientExe"] = path
-            save_config(self.config)
-            log(f"用户指定了 dsh 路径：{path}")
-        try:
-            subprocess.Popen([path], cwd=os.path.dirname(path))
-        except Exception as error:
-            log(f"启动 dsh 失败：{error}")
-            self.say("启动失败，路径可能不对")
+        if not _launch_client(path):
+            self.say("启动失败，点「指定 dsh 程序」选一下 exe")
             return
         self.say("dsh 正在启动…")
         for delay in (6000, 12000):
             QTimer.singleShot(delay, bring_dsh_to_front)
+
+    def pick_client_path(self) -> str:
+        """Let the user point at the exe when none of the guesses land."""
+        chosen = QFileDialog.getOpenFileName(
+            None, "选择 DeepSeek Harness.exe", "", "程序 (*.exe)"
+        )[0]
+        if not chosen:
+            log("用户取消了选择 dsh")
+            return ""
+        self.config["clientExe"] = chosen
+        save_config(self.config)
+        log(f"用户指定了 dsh 路径：{chosen}")
+        return chosen
+
+    def choose_client(self) -> None:
+        """Menu entry: remember a different exe, then try it once."""
+        if self.pick_client_path():
+            self.open_client()
 
     def ask_credentials(self) -> None:
         """One window: log in once inside the pet, the session is kept on disk."""
@@ -3741,6 +3782,7 @@ class Sprite(QWidget):
         menu.addSeparator()
         hide_action = menu.addAction("隐藏")
         hana_action = menu.addAction("打开 dsh 客户端")
+        pick_action = menu.addAction("指定 dsh 程序…")
         menu.addSeparator()
         quit_action = menu.addAction("退出")
 
@@ -3783,6 +3825,8 @@ class Sprite(QWidget):
             self.set_visible(False)
         elif chosen == hana_action:
             self.open_client()
+        elif chosen == pick_action:
+            self.choose_client()
         elif chosen == quit_action:
             QApplication.quit()
 
